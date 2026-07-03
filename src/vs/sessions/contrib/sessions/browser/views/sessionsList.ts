@@ -37,7 +37,6 @@ import { IStyleOverride, defaultButtonStyles, defaultFindWidgetStyles, defaultIn
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { GITHUB_REMOTE_FILE_SCHEME, ISession, ISessionWorkspace, SessionStatus } from '../../../../services/sessions/common/session.js';
 import { AgentSessionApprovalModel, IAgentSessionApprovalInfo } from '../../../../../workbench/contrib/chat/browser/agentSessions/agentSessionApprovalModel.js';
-import { IAutomationService } from '../../../../../workbench/contrib/chat/common/automations/automationService.js';
 import { Button } from '../../../../../base/browser/ui/button/button.js';
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
 import { Action, ActionRunner, IAction, Separator, SubmenuAction } from '../../../../../base/common/actions.js';
@@ -288,7 +287,7 @@ class SessionItemRenderer implements ITreeRenderer<SessionListItem, FuzzyScore, 
 	readonly onDidChangeItemHeight: Event<ISession> = this._onDidChangeItemHeight.event;
 
 	constructor(
-		private readonly options: { grouping: () => SessionsGrouping; sorting: () => SessionsSorting; isPinned: (session: ISession) => boolean; isRead: (session: ISession) => boolean; visibleSessions: IObservable<readonly (IActiveSession | undefined)[]>; getMultiSelectedSessions: (session: ISession) => ISession[]; isInChatsSection: (session: ISession) => boolean },
+		private readonly options: { grouping: () => SessionsGrouping; isPinned: (session: ISession) => boolean; isRead: (session: ISession) => boolean; visibleSessions: IObservable<readonly (IActiveSession | undefined)[]>; getMultiSelectedSessions: (session: ISession) => ISession[]; isInChatsSection: (session: ISession) => boolean },
 		private readonly approvalModel: AgentSessionApprovalModel | undefined,
 		private readonly instantiationService: IInstantiationService,
 		private readonly contextKeyService: IContextKeyService,
@@ -435,7 +434,7 @@ class SessionItemRenderer implements ITreeRenderer<SessionListItem, FuzzyScore, 
 			const hideDetails = sessionStatus === SessionStatus.InProgress || sessionStatus === SessionStatus.NeedsInput;
 
 			if (!hideDetails) {
-				timeDate = this.options.sorting() === SessionsSorting.Updated ? element.updatedAt.read(reader) : element.createdAt;
+				timeDate = element.updatedAt.read(reader);
 			}
 			// Clear and rebuild details row
 			DOM.clearNode(template.detailsRow);
@@ -991,8 +990,6 @@ class SessionPlaceholderRenderer implements ITreeRenderer<SessionListItem, Fuzzy
 //#region Accessibility
 
 class SessionsAccessibilityProvider {
-	constructor(private readonly options: { sorting: () => SessionsSorting }) { }
-
 	getWidgetAriaLabel(): string {
 		return localize('sessionsList', "Sessions");
 	}
@@ -1020,11 +1017,8 @@ class SessionsAccessibilityProvider {
 			return element.label;
 		}
 		const title = element.title.get();
-		const isUpdatedSort = this.options.sorting() === SessionsSorting.Updated;
-		const time = fromNow(isUpdatedSort ? element.updatedAt.get() : element.createdAt, true);
-		return isUpdatedSort
-			? localize('sessionItemAriaUpdated', "{0}, updated {1}", title, time)
-			: localize('sessionItemAriaCreated', "{0}, created {1}", title, time);
+		const updated = fromNow(element.updatedAt.get(), true);
+		return localize('sessionItemAria', "{0}, updated {1}", title, updated);
 	}
 }
 
@@ -1433,8 +1427,6 @@ export interface ISessionsList {
 	isExcludeArchived(): boolean;
 	setExcludeRead(exclude: boolean): void;
 	isExcludeRead(): boolean;
-	setExcludeAutomation(exclude: boolean): void;
-	isExcludeAutomation(): boolean;
 	resetFilters(): void;
 	setWorkspaceGroupCapped(capped: boolean): void;
 	isWorkspaceGroupCapped(): boolean;
@@ -1453,7 +1445,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 	private static readonly EXCLUDED_STATUSES_KEY = 'sessionsListControl.excludedStatuses';
 	private static readonly EXCLUDE_ARCHIVED_KEY = 'sessionsListControl.excludeArchived';
 	private static readonly EXCLUDE_READ_KEY = 'sessionsListControl.excludeRead';
-	private static readonly EXCLUDE_AUTOMATION_KEY = 'sessionsListControl.excludeAutomation';
 	private static readonly WORKSPACE_GROUP_CAPPED_KEY = 'sessionsListControl.workspaceGroupCapped';
 	private static readonly DEFAULT_SESSION_GROUP_LIMIT = 5;
 
@@ -1471,7 +1462,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 	private readonly excludedStatuses: Set<SessionStatus>;
 	private _excludeArchived: boolean;
 	private _excludeRead: boolean;
-	private _excludeAutomation: boolean;
 	private workspaceGroupCapped: boolean;
 
 	/**
@@ -1518,7 +1508,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 		@ISessionGroupsService private readonly _sessionGroupsService: ISessionGroupsService,
 		@ISessionSectionOrderService private readonly _sessionSectionOrderService: ISessionSectionOrderService,
 		@IAgentHostFilterService private readonly _agentHostFilterService: IAgentHostFilterService,
-		@IAutomationService private readonly _automationService: IAutomationService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
 		@IStorageService private readonly storageService: IStorageService,
@@ -1539,7 +1528,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 		// Load archived/read filter state
 		this._excludeArchived = this.storageService.getBoolean(SessionsList.EXCLUDE_ARCHIVED_KEY, StorageScope.PROFILE, true);
 		this._excludeRead = this.storageService.getBoolean(SessionsList.EXCLUDE_READ_KEY, StorageScope.PROFILE, false);
-		this._excludeAutomation = this.storageService.getBoolean(SessionsList.EXCLUDE_AUTOMATION_KEY, StorageScope.PROFILE, false);
 		this.workspaceGroupCapped = this.storageService.getBoolean(SessionsList.WORKSPACE_GROUP_CAPPED_KEY, StorageScope.PROFILE, true);
 
 		this.listContainer = DOM.append(container, $('.sessions-list-control'));
@@ -1576,7 +1564,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 		// TEMPORARY (#320480): see the note on the `IAgentSessionsService` import.
 		const agentSessionsService = instantiationService.invokeFunction(accessor => accessor.get(IAgentSessionsService));
 		const sessionRenderer = new SessionItemRenderer(
-			{ grouping: this.options.grouping, sorting: this.options.sorting, isPinned: s => this.isSessionPinned(s), isRead: s => this.isSessionRead(s), visibleSessions: this._sessionsService.visibleSessions, getMultiSelectedSessions: s => this.getMultiSelectedSessions(s), isInChatsSection: s => this._chatsSectionSessionIds.has(s.resource.toString()) },
+			{ grouping: this.options.grouping, isPinned: s => this.isSessionPinned(s), isRead: s => this.isSessionRead(s), visibleSessions: this._sessionsService.visibleSessions, getMultiSelectedSessions: s => this.getMultiSelectedSessions(s), isInChatsSection: s => this._chatsSectionSessionIds.has(s.resource.toString()) },
 			approvalModel,
 			instantiationService,
 			contextKeyService,
@@ -1615,7 +1603,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 				placeholderRenderer,
 			],
 			{
-				accessibilityProvider: new SessionsAccessibilityProvider({ sorting: this.options.sorting }),
+				accessibilityProvider: new SessionsAccessibilityProvider(),
 				dnd: this._register(new SessionsListDragAndDrop({
 					isReorderable: session => this.isReorderable(session),
 					isSessionPinned: session => this.isSessionPinned(session),
@@ -1917,17 +1905,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 		if (this._excludeRead) {
 			filtered = filtered.filter(s => !this.isSessionRead(s));
 		}
-		if (this._excludeAutomation) {
-			// Derive automation sessions from run history (source tag not persisted on model).
-			const automationSessionIds = new Set<string>();
-			for (const run of this._automationService.runs.get()) {
-				if (run.sessionId) {
-					automationSessionIds.add(run.sessionId);
-				}
-			}
-			filtered = filtered.filter(s => !automationSessionIds.has(s.sessionId));
-		}
-
 		// Always include the active session even if it was filtered out,
 		// so it remains visible while selected
 		if (activeSession && !filtered.some(s => s.sessionId === activeSession.sessionId)) {
@@ -2790,16 +2767,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 		return this._excludeRead;
 	}
 
-	setExcludeAutomation(exclude: boolean): void {
-		this._excludeAutomation = exclude;
-		this.storageService.store(SessionsList.EXCLUDE_AUTOMATION_KEY, exclude, StorageScope.PROFILE, StorageTarget.USER);
-		this.update();
-	}
-
-	isExcludeAutomation(): boolean {
-		return this._excludeAutomation;
-	}
-
 	resetFilters(): void {
 		this.excludedSessionTypes.clear();
 		this.saveExcludedSessionTypes();
@@ -2809,8 +2776,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 		this.storageService.store(SessionsList.EXCLUDE_ARCHIVED_KEY, true, StorageScope.PROFILE, StorageTarget.USER);
 		this._excludeRead = false;
 		this.storageService.store(SessionsList.EXCLUDE_READ_KEY, false, StorageScope.PROFILE, StorageTarget.USER);
-		this._excludeAutomation = false;
-		this.storageService.store(SessionsList.EXCLUDE_AUTOMATION_KEY, false, StorageScope.PROFILE, StorageTarget.USER);
 		this.workspaceGroupCapped = true;
 		this.storageService.store(SessionsList.WORKSPACE_GROUP_CAPPED_KEY, true, StorageScope.PROFILE, StorageTarget.USER);
 		this.expandedSessionGroups.clear();
